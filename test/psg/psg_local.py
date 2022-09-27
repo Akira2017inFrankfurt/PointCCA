@@ -20,7 +20,7 @@ def get_dataloader(root):
     return tqdm(train_loader), test_loader
 
 
-def log_func(log_file)
+def log_func(log_file):
     # log parameters
     # log_file = r'/home/haruki/下载/SimAttention/partseg_test/runs/local_test_04'
     if not os.path.exists(log_file):
