@@ -1,65 +1,56 @@
-from partseg_hf5 import ShapeNetPart_Original
-from partseg_test.partseg_classifier import PartSegClassifier, PartSegClassifier_2
-from utils.train_partseg_with_IoU import calculate_shape_IoU, calculate_category_IoU
-import sklearn.metrics as metrics
-from torch.utils.tensorboard import SummaryWriter
 import os
 import torch
+import math
+import argparse
 import numpy as np
 from tqdm import tqdm
-import math
+import sklearn.metrics as metrics
+from partseg_hf5 import ShapeNetPart_Original
+from torch.utils.tensorboard import SummaryWriter
+from partseg_test.partseg_classifier import PartSegClassifier, PartSegClassifier_2
+from utils.train_partseg_with_IoU import calculate_shape_IoU, calculate_category_IoU
 
-# set device
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-
-# load model, use pretrained weights
-model_path = r'/home/haruki/下载/SimAttention/scripts/psg_weights/model_seg_partseg_3_98.pth'
-# model = PartSegClassifier(model_path).to(device)
-model = PartSegClassifier_2(model_path).to(device)
-
-
-# parameters
-lr = 1e-3
-lrf = 1e-3
-max_epoch = 400
-batch_size = 12
-criterion = torch.nn.CrossEntropyLoss()
 
 # load data
-root = r'/home/haruki/下载/shapenet/shapenet_part_seg_hdf5_data'
-train_data_set = ShapeNetPart_Original(
-    root=root,
-    num_points=2048,
-    partition='trainval',
-    class_choice=None
-)
-train_loader = torch.utils.data.DataLoader(train_data_set, batch_size=batch_size, shuffle=True)
-train_loader = tqdm(train_loader)
-test_data_set = ShapeNetPart_Original(
-    root=root,
-    num_points=2048,
-    partition='test',
-    class_choice=None
-)
-test_loader = torch.utils.data.DataLoader(test_data_set, batch_size=batch_size, shuffle=True)
-test_loader = test_loader
+def get_dataloader(root):
+    train_data_set = ShapeNetPart_Original(root=root, num_points=2048, partition='trainval', class_choice=None)
+    test_data_set = ShapeNetPart_Original(root=root, num_points=2048, partition='test', class_choice=None)
+    train_loader = torch.utils.data.DataLoader(train_data_set, batch_size=batch_size, shuffle=True)
+    test_loader = torch.utils.data.DataLoader(test_data_set, batch_size=batch_size, shuffle=True)
+    return tqdm(train_loader), test_loader
 
-# log parameters
-log_file = r'/home/haruki/下载/SimAttention/partseg_test/runs/local_test_04'
-if not os.path.exists(log_file):
-    os.makedirs(log_file)
-tb_writer = SummaryWriter(log_dir=log_file)
-tags = ["learning_rate",
-        "instance_train_mIoU",
-        "instance_test_mIoU",
-        "category_train_mIoU",
-        "category_test_mIoU",
-        "train_acc",
-        "test_acc",
-        "train_avg_per_class_acc",
-        "test_avg_per_class_acc",
-        "train_loss",
-        "test_loss"]
+
+def log_func(log_file)
+    # log parameters
+    # log_file = r'/home/haruki/下载/SimAttention/partseg_test/runs/local_test_04'
+    if not os.path.exists(log_file):
+        os.makedirs(log_file)
+    tb_writer = SummaryWriter(log_dir=log_file)
+    tags = ["learning_rate",
+            "instance_train_mIoU",
+            "instance_test_mIoU",
+            "category_train_mIoU",
+            "category_test_mIoU",
+            "train_acc",
+            "test_acc",
+            "train_avg_per_class_acc",
+            "test_avg_per_class_acc",
+            "train_loss",
+            "test_loss"]
+    return tags, tb_writer
+
+
+
+def get_optimizer_scheduler(model, args):
+    # default optimizer: sgd
+    optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=0.005)
+    if args.opt_choice == 1:
+        # adamw optimizer
+        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, betas=(0.9, 0.999), weight_decay=0.01)
+    
+    lf = lambda x: ((1 + math.cos(x * math.pi / max_epoch)) / 2) * (1 - args.lrf) + args.lrf
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)
+    return optimizer, scheduler
 
 
 @torch.no_grad()
@@ -104,6 +95,8 @@ def evaluate(test_model, loader):
 
 def train_1_epoch(train_model, loader, optimizer, epoch):
     train_model.train()
+    criterion = torch.nn.CrossEntropyLoss()
+
     # for epoch in range(0, max_epoch):
     print('\n')
     print('***** {} epoch now is training... ******'.format(epoch))
@@ -155,13 +148,12 @@ def train_1_epoch(train_model, loader, optimizer, epoch):
     return train_acc, train_loss * 1.0 / count, np.mean(train_ins_IoUs), avg_per_class_acc, train_category_ious_dict
 
 
-def train_test_record(epochs):
-    # sgd opt
-    optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=0.005)
-    # adamw opt
-    # optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.999), weight_decay=0.01)
-    lf = lambda x: ((1 + math.cos(x * math.pi / max_epoch)) / 2) * (1 - lrf) + lrf
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)
+def run(args):
+    model = PartSegClassifier_2(args.model_path).to(device)
+    train_loader, test_loader = get_dataloader(args.data_root)
+    tb_writer, tags = log_func(args.run_file_name)
+    optimizer, scheduler = get_optimizer_scheduler(model, args)
+
 
     # train and test category shape mIoUs dict
     class_choices = [
@@ -177,15 +169,18 @@ def train_test_record(epochs):
         test_best_category_dict[class_choices[i]] = 0.0
 
     try:
-        checkpoint = torch.load('/home/haruki/下载/SimAttention/psg_data/best_ins-IoU_psg_98_sgd_update_400_model.pth')
+        checkpoint = torch.load(args.best_model_path)
         model.load_state_dict(checkpoint['model_state_dict'])
         best_test_ins_ious = checkpoint['test_ins_ious']
-        print('Use pretrain model')
+        start_epoch = checkpoint['stop_epoch']
+        print('Use pretrain model, and train from %d epoch.' % start_epoch)
     except:
         print('No existing model, starting training from scratch...')
         best_test_ins_ious = 0.0
+        start_epoch = 0
 
-    for epoch in range(epochs):
+    # start train
+    for epoch in range(start_epoch, args.max_epoch):
         train_acc, train_loss, ins_train_iou, train_avg_acc, train_category_dict = train_1_epoch(
             train_model=model,
             optimizer=optimizer,
@@ -237,10 +232,27 @@ def train_test_record(epochs):
                 'test_ins_ious': best_test_ins_ious,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
+                'stop_epoch': epoch,
             }
             torch.save(state, save_path)
         print('best test instance IoU now is: ', best_test_ins_ious)
 
 
 if __name__ == "__main__":
-    train_test_record(max_epoch)
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--model_path', type=str, default=r'/home/haruki/下载/SimAttention/scripts/psg_weights/model_seg_partseg_3_98.pth')
+    parser.add_argument('--data_root', type=float, default=r'/home/haruki/下载/shapenet/shapenet_part_seg_hdf5_data')
+    parser.add_argument('--run_file_name', type=str, default=r'/home/haruki/下载/SimAttention/partseg_test/runs/local_test_04')
+    parser.add_argument('--best_model_path', type=str, default='/home/haruki/下载/SimAttention/psg_data/best_ins-IoU_psg_98_sgd_update_400_model.pth')
+    
+    parser.add_argument('--lr', type=float, default=0.001)
+    parser.add_argument('--lrf', type=float, default=0.001)
+    parser.add_argument('--max_epoch', type=int, default=100)
+    parser.add_argument('--batch_size', type=int, default=12)
+    parser.add_argument('--opt_choice', type=int, default=0)  # 0:SGD, 1:AdamW 
+    opt = parser.parse_args()
+    return opt
+
+    run(opt)
