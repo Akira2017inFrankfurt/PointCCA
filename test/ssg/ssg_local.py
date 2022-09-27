@@ -1,10 +1,10 @@
-from partseg_hf5 import ShapeNetPart_Original
-from partseg_test.partseg_classifier import PartSegClassifier, PartSegClassifier_2
-from utils.train_partseg_with_IoU import calculate_shape_IoU, calculate_category_IoU
+from sem_seg.dgcnn_s3dis_dataloader import S3DIS
+from semseg_classifier import SemSegClassifier_3, SemSegClassifier_4
 import sklearn.metrics as metrics
 from torch.utils.tensorboard import SummaryWriter
 import os
 import torch
+import torch.nn as nn
 import numpy as np
 from tqdm import tqdm
 import math
@@ -13,53 +13,63 @@ import math
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 # load model, use pretrained weights
-model_path = r'/home/haruki/下载/SimAttention/scripts/psg_weights/model_seg_partseg_3_98.pth'
-# model = PartSegClassifier(model_path).to(device)
-model = PartSegClassifier_2(model_path).to(device)
-
+model_path = r'/home/haruki/下载/SimAttention/sem_seg/semseg_test/weights/model_sem_seg_v1-23.pth'
+model = SemSegClassifier_4(model_path).to(device)
 
 # parameters
-lr = 1e-3
+lr = 5e-4
 lrf = 1e-3
-max_epoch = 400
-batch_size = 12
+max_epoch = 100
+batch_size = 6
 criterion = torch.nn.CrossEntropyLoss()
 
 # load data
-root = r'/home/haruki/下载/shapenet/shapenet_part_seg_hdf5_data'
-train_data_set = ShapeNetPart_Original(
+root = r'/home/haruki/下载/SimAttention/sem_seg/'
+train_data_set = S3DIS(
     root=root,
-    num_points=2048,
-    partition='trainval',
-    class_choice=None
+    num_points=4096,
+    partition='train'
 )
 train_loader = torch.utils.data.DataLoader(train_data_set, batch_size=batch_size, shuffle=True)
 train_loader = tqdm(train_loader)
-test_data_set = ShapeNetPart_Original(
+test_data_set = S3DIS(
     root=root,
-    num_points=2048,
-    partition='test',
-    class_choice=None
+    num_points=4096,
+    partition='test'
 )
 test_loader = torch.utils.data.DataLoader(test_data_set, batch_size=batch_size, shuffle=True)
-test_loader = test_loader
 
 # log parameters
-log_file = r'/home/haruki/下载/SimAttention/partseg_test/runs/local_test_04'
+log_file = r'/home/haruki/下载/SimAttention/sem_seg/semseg_test/runs/local_test_02'
 if not os.path.exists(log_file):
     os.makedirs(log_file)
 tb_writer = SummaryWriter(log_dir=log_file)
 tags = ["learning_rate",
         "instance_train_mIoU",
         "instance_test_mIoU",
-        "category_train_mIoU",
-        "category_test_mIoU",
         "train_acc",
         "test_acc",
         "train_avg_per_class_acc",
         "test_avg_per_class_acc",
         "train_loss",
         "test_loss"]
+
+
+def calculate_sem_IoU(pred_np, seg_np, visual=False):
+    I_all = np.zeros(13)
+    U_all = np.zeros(13)
+    for sem_idx in range(seg_np.shape[0]):
+        for sem in range(13):
+            I = np.sum(np.logical_and(pred_np[sem_idx] == sem, seg_np[sem_idx] == sem))
+            U = np.sum(np.logical_or(pred_np[sem_idx] == sem, seg_np[sem_idx] == sem))
+            I_all[sem] += I
+            U_all[sem] += U
+    if visual:
+        for sem in range(13):
+            if U_all[sem] == 0:
+                I_all[sem] = 1
+                U_all[sem] = 1
+    return I_all / U_all
 
 
 @torch.no_grad()
@@ -71,11 +81,10 @@ def evaluate(test_model, loader):
     test_pred_cls = []
     test_true_seg = []
     test_pred_seg = []
-    test_label_seg = []
 
-    for feature, label, seg, label_1_hot in loader:
-        feature, seg, label_1_hot = feature.to(device), seg.to(device), label_1_hot.to(device)
-        pred = test_model(feature.float(), label_1_hot)
+    for feature, seg in loader:
+        feature, seg = feature.to(device), seg.to(device)
+        pred = test_model(feature.float())
         loss = criterion(pred, seg.long())
         pred_choice = pred.data.max(1)[1]
         test_batch_size = feature.shape[0]
@@ -88,7 +97,6 @@ def evaluate(test_model, loader):
         test_pred_cls.append(pred_np.reshape(-1))
         test_true_seg.append(seg_np)
         test_pred_seg.append(pred_np)
-        test_label_seg.append(label.reshape(-1))
 
     test_true_cls = np.concatenate(test_true_cls)
     test_pred_cls = np.concatenate(test_pred_cls)
@@ -96,10 +104,9 @@ def evaluate(test_model, loader):
     avg_per_class_acc = metrics.balanced_accuracy_score(test_true_cls, test_pred_cls)
     test_true_seg = np.concatenate(test_true_seg, axis=0)
     test_pred_seg = np.concatenate(test_pred_seg, axis=0)
-    test_label_seg = np.concatenate(test_label_seg)
-    test_ins_IoUs = calculate_shape_IoU(test_pred_seg, test_true_seg, test_label_seg, None)
-    test_category_ious_dict = calculate_category_IoU(test_ins_IoUs, test_label_seg)
-    return test_acc, test_loss * 1.0 / count, np.mean(test_ins_IoUs), avg_per_class_acc, test_category_ious_dict
+
+    test_IoUs = calculate_sem_IoU(test_pred_seg, test_true_seg)
+    return test_acc, test_loss * 1.0 / count, np.mean(test_IoUs), avg_per_class_acc
 
 
 def train_1_epoch(train_model, loader, optimizer, epoch):
@@ -109,17 +116,17 @@ def train_1_epoch(train_model, loader, optimizer, epoch):
     print('***** {} epoch now is training... ******'.format(epoch))
     train_loss = 0.0
     count = 0.0
+
     train_true_cls = []
     train_pred_cls = []
     train_true_seg = []
     train_pred_seg = []
-    train_label_seg = []
 
-    for feature, label, seg, label_1_hot in loader:
-        feature, seg, label_1_hot = feature.to(device), seg.to(device), label_1_hot.to(device)
+    for feature, seg in loader:
+        feature, seg = feature.to(device), seg.to(device)
         optimizer.zero_grad()
-        # print('label 1 hot shape: ', label_1_hot.shape)
-        pred = train_model(feature.float(), label_1_hot)  # (B, seg_num_all, N)
+
+        pred = train_model(feature.float())
         loss = criterion(pred, seg.long())
         loss.backward()
         optimizer.step()
@@ -138,7 +145,6 @@ def train_1_epoch(train_model, loader, optimizer, epoch):
 
         train_true_seg.append(seg_np)
         train_pred_seg.append(pred_np)
-        train_label_seg.append(label.reshape(-1))
 
     train_true_cls = np.concatenate(train_true_cls)
     train_pred_cls = np.concatenate(train_pred_cls)
@@ -146,13 +152,9 @@ def train_1_epoch(train_model, loader, optimizer, epoch):
     avg_per_class_acc = metrics.balanced_accuracy_score(train_true_cls, train_pred_cls)
     train_true_seg = np.concatenate(train_true_seg, axis=0)
     train_pred_seg = np.concatenate(train_pred_seg, axis=0)
-    train_label_seg = np.concatenate(train_label_seg)
-    # print('train_label_seg shape: ', len(train_label_seg))  # 14007
-    train_ins_IoUs = calculate_shape_IoU(train_pred_seg, train_true_seg, train_label_seg, None)
-    # print('train_IoUs shape: ', len(train_IoUs), train_IoUs[0])  # 14007
-    train_category_ious_dict = calculate_category_IoU(train_ins_IoUs, train_label_seg)
-    # print('dict: ', train_category_ious_dict)
-    return train_acc, train_loss * 1.0 / count, np.mean(train_ins_IoUs), avg_per_class_acc, train_category_ious_dict
+
+    train_IoUs = calculate_sem_IoU(train_pred_seg, train_true_seg)
+    return train_acc, train_loss * 1.0 / count, np.mean(train_IoUs), avg_per_class_acc
 
 
 def train_test_record(epochs):
@@ -163,21 +165,8 @@ def train_test_record(epochs):
     lf = lambda x: ((1 + math.cos(x * math.pi / max_epoch)) / 2) * (1 - lrf) + lrf
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)
 
-    # train and test category shape mIoUs dict
-    class_choices = [
-        'airplane', 'bag', 'cap', 'car',
-        'chair', 'earphone', 'guitar', 'knife',
-        'lamp', 'laptop', 'motorbike', 'mug',
-        'pistol', 'rocket', 'skateboard', 'table'
-    ]
-    train_best_category_dict = {}
-    test_best_category_dict = {}
-    for i in range(len(class_choices)):
-        train_best_category_dict[class_choices[i]] = 0.0
-        test_best_category_dict[class_choices[i]] = 0.0
-
     try:
-        checkpoint = torch.load('/home/haruki/下载/SimAttention/psg_data/best_ins-IoU_psg_98_sgd_update_400_model.pth')
+        checkpoint = torch.load('/home/haruki/下载/SimAttention/sem_seg/semseg_test/best_IoU_23_sgd_true_100_model.pth')
         model.load_state_dict(checkpoint['model_state_dict'])
         best_test_ins_ious = checkpoint['test_ins_ious']
         print('Use pretrain model')
@@ -186,7 +175,7 @@ def train_test_record(epochs):
         best_test_ins_ious = 0.0
 
     for epoch in range(epochs):
-        train_acc, train_loss, ins_train_iou, train_avg_acc, train_category_dict = train_1_epoch(
+        train_acc, train_loss, ins_train_iou, train_avg_acc = train_1_epoch(
             train_model=model,
             optimizer=optimizer,
             loader=train_loader,
@@ -194,44 +183,25 @@ def train_test_record(epochs):
 
         scheduler.step()
 
-        test_acc, test_loss, ins_test_iou, test_avg_acc, test_category_dict = evaluate(test_model=model,
-                                                                                       loader=test_loader)
+        test_acc, test_loss, ins_test_iou, test_avg_acc = evaluate(test_model=model,
+                                                                   loader=test_loader)
         print('- {} epoch test instance mIoU is: '.format(epoch), ins_test_iou)
-
-        # category mIoU, above show all single category mIoU
-        train_cate_mious = sum(train_category_dict.values()) / 16
-        test_cate_mious = sum(test_category_dict.values()) / 16
-        print('- {} epoch test category mIoU is: '.format(epoch), test_cate_mious)
-
-        # get the best value for each category
-        for i in range(len(class_choices)):
-            if train_best_category_dict[class_choices[i]] < train_category_dict[class_choices[i]]:
-                train_best_category_dict[class_choices[i]] = train_category_dict[class_choices[i]]
-            if test_best_category_dict[class_choices[i]] < test_category_dict[class_choices[i]]:
-                test_best_category_dict[class_choices[i]] = test_category_dict[class_choices[i]]
 
         tb_writer.add_scalar(tags[0], optimizer.param_groups[0]["lr"], epoch)
         # add instance_mIoU + single_category_mIoU + category_mIoU:  1 and 3 need curve on tensorboard, 2 just record
         tb_writer.add_scalar(tags[1], ins_train_iou, epoch)
         tb_writer.add_scalar(tags[2], ins_test_iou, epoch)
-        tb_writer.add_scalar(tags[3], train_cate_mious, epoch)
-        tb_writer.add_scalar(tags[4], test_cate_mious, epoch)
-        tb_writer.add_scalar(tags[5], train_acc, epoch)
-        tb_writer.add_scalar(tags[6], test_acc, epoch)
-        tb_writer.add_scalar(tags[7], train_avg_acc, epoch)
-        tb_writer.add_scalar(tags[8], test_avg_acc, epoch)
-        tb_writer.add_scalar(tags[9], train_loss, epoch)
-        tb_writer.add_scalar(tags[10], test_loss, epoch)
-
-        print('Train Best Category mIoUs Dict: ')
-        print(train_best_category_dict)
-        print('Test Best Category mIoUs Dict: ')
-        print(test_best_category_dict)
+        tb_writer.add_scalar(tags[3], train_acc, epoch)
+        tb_writer.add_scalar(tags[4], test_acc, epoch)
+        tb_writer.add_scalar(tags[5], train_avg_acc, epoch)
+        tb_writer.add_scalar(tags[6], test_avg_acc, epoch)
+        tb_writer.add_scalar(tags[7], train_loss, epoch)
+        tb_writer.add_scalar(tags[8], test_loss, epoch)
 
         if best_test_ins_ious < ins_test_iou:
             best_test_ins_ious = ins_test_iou
             print('{} epoch save model...'.format(epoch))
-            save_path = '/home/haruki/下载/SimAttention/psg_data/best_ins-IoU_psg_98_sgd_update_400_model.pth'
+            save_path = '/home/haruki/下载/SimAttention/sem_seg/semseg_test/best_IoU_23_sgd_true_100_model.pth'
             print('Saving at %s' % save_path)
             state = {
                 'test_ins_ious': best_test_ins_ious,
