@@ -40,7 +40,22 @@ def log_func(log_file):
     return tags, tb_writer
 
 
-
+def get_cls_choice_dict():
+    # train and test category shape mIoUs dict
+    cls_choices = [
+        'airplane', 'bag', 'cap', 'car',
+        'chair', 'earphone', 'guitar', 'knife',
+        'lamp', 'laptop', 'motorbike', 'mug',
+        'pistol', 'rocket', 'skateboard', 'table'
+    ]
+    train_best = {}
+    test_best = {}
+    for i in range(len(cls_choices)):
+        train_best[cls_choices[i]] = 0.0
+        test_best[cls_choices[i]] = 0.0
+    return cls_choices, train_best, test_best
+        
+        
 def get_optimizer_scheduler(model, args):
     # default optimizer: sgd
     optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=0.005)
@@ -153,21 +168,8 @@ def run(args):
     train_loader, test_loader = get_dataloader(args.data_root)
     tb_writer, tags = log_func(args.run_file_name)
     optimizer, scheduler = get_optimizer_scheduler(model, args)
-
-
-    # train and test category shape mIoUs dict
-    class_choices = [
-        'airplane', 'bag', 'cap', 'car',
-        'chair', 'earphone', 'guitar', 'knife',
-        'lamp', 'laptop', 'motorbike', 'mug',
-        'pistol', 'rocket', 'skateboard', 'table'
-    ]
-    train_best_category_dict = {}
-    test_best_category_dict = {}
-    for i in range(len(class_choices)):
-        train_best_category_dict[class_choices[i]] = 0.0
-        test_best_category_dict[class_choices[i]] = 0.0
-
+    class_choices, train_best_category_dict, test_best_category_dict = get_cls_choice_dict()
+    
     try:
         checkpoint = torch.load(args.best_model_path)
         model.load_state_dict(checkpoint['model_state_dict'])
@@ -253,6 +255,5 @@ if __name__ == "__main__":
     parser.add_argument('--batch_size', type=int, default=12)
     parser.add_argument('--opt_choice', type=int, default=0)  # 0:SGD, 1:AdamW 
     opt = parser.parse_args()
-    return opt
 
     run(opt)
