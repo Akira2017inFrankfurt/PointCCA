@@ -37,8 +37,8 @@ class Modelnet40(Dataset):
         assert (split == 'train' or split == 'test')
 
         shape_names = ['_'.join(x.split('_')[0:-1]) for x in shape_ids[split]]
-        self.data_path = [(shape_names[i], 
-            os.path.join(self.root, shape_names[i], shape_ids[split][i]) + '.txt') for i
+        self.data_path = [(shape_names[i],
+                           os.path.join(self.root, shape_names[i], shape_ids[split][i]) + '.txt') for i
                           in range(len(shape_ids[split]))]
         print('The size of %s data is %d' % (split, len(self.data_path)))
         self.cache_size = cache_size
@@ -86,24 +86,30 @@ class Modelnet40_Scale(Dataset):
         assert (split == 'train' or split == 'test')
 
         shape_names = ['_'.join(x.split('_')[0:-1]) for x in shape_ids[split]]
-        self.data_path = [(shape_names[i], 
-            os.path.join(self.root, shape_names[i], shape_ids[split][i]) + '.txt') for i
+        self.data_path = [(shape_names[i],
+                           os.path.join(self.root, shape_names[i], shape_ids[split][i]) + '.txt') for i
                           in range(len(shape_ids[split]))]
-        self.scale_data_path = random.shuffle(self.data_path[:][1])[:int(scale_rate * len(self.data_path))]
-        print('The size of %s data is %d' % (split, len(self.data_path)))
-        print('With {} scale_rate, the size of {} data is {}'.format(scale_rate, split, len(self.scale_data_path)))
-        self.cache_size = cache_size
+        if split == 'train':
+            self.scale_data_path = list(self.data_path)
+            random.shuffle(self.scale_data_path)
+            self.scale_data_path = self.scale_data_path[: int(scale_rate * len(self.data_path))+1]
+            print('With {} scale_rate, the size of train data is {}'.format(scale_rate, len(self.scale_data_path)))
+        else:
+            self.scale_data_path = self.data_path
+            print('The size of test data is %d' % ( len(self.scale_data_path)))
+            scale_rate = 1
+        self.cache_size = cache_size * scale_rate
         self.cache = {}
 
     def __len__(self):
-        return len(self.data_path)
+        return len(self.scale_data_path)
 
     def _get_item(self, index):
         if index in self.cache:
             morph1, morph2 = self.cache[index]
         else:
             fn = self.scale_data_path[index]
-            point_set = np.genfromtxt(fn, delimiter=',').astype(np.float32)
+            point_set = np.genfromtxt(fn[1], delimiter=',').astype(np.float32)
             point_set = point_set[:, 0:3]
 
             point_set = random_dropout(point_set)
@@ -122,17 +128,20 @@ class Modelnet40_Scale(Dataset):
 
 
 if __name__ == "__main__":
-    base_root = r'/home/haruki/下载/PointCCA/data/cls/data'
+    base_root = r'/Volumes/Haruki2022/PointCCA/data/cls/data'
 
 
-    def test_data():
-        aug_dataset = Modelnet40(root=base_root, split='train')
+    def test_data(dataset):
+        aug_dataset = dataset(root=base_root, split='train', scale_rate=0.05)
         trainDataLoader = torch.utils.data.DataLoader(aug_dataset, batch_size=4,
                                                       shuffle=True, num_workers=4,
                                                       pin_memory=True)
+        count = 0
         for aug1, aug2 in trainDataLoader:
-            print(aug1.shape)
-            print(aug2.shape)
-            break
+            count += 1
+            print(count)
+        print('test done')
 
-    test_data()  # torch.Size([4, 10000, 3]) ---> B, N, f
+    # test_data()  # torch.Size([4, 10000, 3]) ---> B, N, f
+    # test_data(Modelnet40)
+    test_data(Modelnet40_Scale)
