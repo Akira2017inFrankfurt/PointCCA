@@ -1,5 +1,6 @@
 import os
 import torch
+import random
 import numpy as np
 from torch.utils.data import Dataset
 from data.augmentation import PointWOLF
@@ -36,7 +37,8 @@ class Modelnet40(Dataset):
         assert (split == 'train' or split == 'test')
 
         shape_names = ['_'.join(x.split('_')[0:-1]) for x in shape_ids[split]]
-        self.data_path = [(shape_names[i], os.path.join(self.root, shape_names[i], shape_ids[split][i]) + '.txt') for i
+        self.data_path = [(shape_names[i], 
+            os.path.join(self.root, shape_names[i], shape_ids[split][i]) + '.txt') for i
                           in range(len(shape_ids[split]))]
         print('The size of %s data is %d' % (split, len(self.data_path)))
         self.cache_size = cache_size
@@ -51,6 +53,57 @@ class Modelnet40(Dataset):
         else:
             fn = self.data_path[index]
             point_set = np.genfromtxt(fn[1], delimiter=',').astype(np.float32)
+            point_set = point_set[:, 0:3]
+
+            point_set = random_dropout(point_set)
+            point_set = translate_point_cloud(point_set)
+
+            _, morph1 = self.aug1(point_set)
+            _, morph2 = self.aug2(point_set)
+
+            if len(self.cache) < self.cache_size:
+                self.cache[index] = (morph1, morph2)
+
+        return morph1, morph2
+
+    def __getitem__(self, index):
+        return self._get_item(index)
+
+
+class Modelnet40_Scale(Dataset):
+    def __init__(self, root, split='train', scale_rate=0.01, cache_size=15000):
+        super().__init__()
+        self.root = root
+        self.cat_file = os.path.join(self.root, 'modelnet40_shape_names.txt')
+        self.cat = [line.rstrip() for line in open(self.cat_file)]
+        self.classes = dict(zip(self.cat, range(len(self.cat))))
+        self.aug1 = PointWOLF(0.4)
+        self.aug2 = PointWOLF(0.8)
+
+        shape_ids = {'train': [line.rstrip() for line in open(os.path.join(self.root, 'modelnet40_train.txt'))],
+                     'test': [line.rstrip() for line in open(os.path.join(self.root, 'modelnet40_test.txt'))]}
+
+        assert (split == 'train' or split == 'test')
+
+        shape_names = ['_'.join(x.split('_')[0:-1]) for x in shape_ids[split]]
+        self.data_path = [(shape_names[i], 
+            os.path.join(self.root, shape_names[i], shape_ids[split][i]) + '.txt') for i
+                          in range(len(shape_ids[split]))]
+        self.scale_data_path = random.shuffle(self.data_path[:][1])[:int(scale_rate * len(self.data_path))]
+        print('The size of %s data is %d' % (split, len(self.data_path)))
+        print('With {} scale_rate, the size of {} data is {}'.format(scale_rate, split, len(self.scale_data_path)))
+        self.cache_size = cache_size
+        self.cache = {}
+
+    def __len__(self):
+        return len(self.data_path)
+
+    def _get_item(self, index):
+        if index in self.cache:
+            morph1, morph2 = self.cache[index]
+        else:
+            fn = self.scale_data_path[index]
+            point_set = np.genfromtxt(fn, delimiter=',').astype(np.float32)
             point_set = point_set[:, 0:3]
 
             point_set = random_dropout(point_set)
